@@ -85,9 +85,6 @@ docker logs rice-cooker-api-1 -f
 ```bash
 # Test health endpoint
 curl http://localhost:8000/health
-
-# Or use the test script
-python simple_test.py
 ```
 
 ## API Endpoints
