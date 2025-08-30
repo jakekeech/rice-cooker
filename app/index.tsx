@@ -1,5 +1,5 @@
 // app/index.tsx
-import React, { useEffect, useRef, useState, useLayoutEffect } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -13,13 +13,8 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
-import {
-  Video,
-  ResizeMode,
-  Audio,
-  InterruptionModeIOS,
-  InterruptionModeAndroid,
-} from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { setAudioModeAsync } from 'expo-audio';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter, useNavigation, type Href } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -29,32 +24,37 @@ const API_BASE_URL = 'http://localhost:8000'; // ← change to your backend host
 export default function PrivacyFilterUpload() {
   const router = useRouter();
   const navigation = useNavigation();
-  const playerRef = useRef<Video>(null);
 
   const [pickedUri, setPickedUri] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Keep default header/back button; just set the title
   useLayoutEffect(() => {
-    navigation.setOptions({ title: 'Privacy Filter' });
+    navigation.setOptions({ title: '' });
   }, [navigation]);
 
-  // Enable audio playback in silent mode (iOS) + sane Android defaults
+  // Enable audio playback even with iOS mute switch on
   useEffect(() => {
     (async () => {
       try {
-        await Audio.setAudioModeAsync({
-          playsInSilentModeIOS: true,
-          interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-          staysActiveInBackground: false,
-          shouldDuckAndroid: true,
-          interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-          playThroughEarpieceAndroid: false,
-          allowsRecordingIOS: false,
+        await setAudioModeAsync({
+          playsInSilentMode: true, // iOS: allow playback in silent mode
         });
       } catch {}
     })();
   }, []);
+
+  // Build/refresh player when URI changes
+  const player = useVideoPlayer(
+    useMemo(() => pickedUri ?? null, [pickedUri]),
+    (p) => {
+      // init settings whenever player (re)loads this source
+      p.muted = false;
+      p.volume = 1.0;
+      p.loop = false;
+      // p.play(); // keep paused for preview; uncomment to auto-play
+    }
+  );
 
   const launchPicker = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -73,6 +73,7 @@ export default function PrivacyFilterUpload() {
     }
   };
 
+  // Only open gallery if nothing selected yet
   const pickVideo = async () => {
     if (pickedUri) return;
     await launchPicker();
@@ -86,6 +87,7 @@ export default function PrivacyFilterUpload() {
     setPickedUri(null);
   };
 
+  // Ensure we can upload: convert content:// / ph:// to a file:// temp if needed
   const ensureCacheFile = async (uri: string): Promise<string> => {
     if (uri.startsWith('file://')) return uri;
     const ext = uri.split('?')[0].split('.').pop()?.toLowerCase() || 'mp4';
@@ -125,7 +127,7 @@ export default function PrivacyFilterUpload() {
       const res = await fetch(`${API_BASE_URL}/analyze/video`, {
         method: 'POST',
         body: form,
-        headers: Platform.OS === 'web' ? {} : undefined,
+        headers: Platform.OS === 'web' ? {} : undefined, // RN sets multipart boundary on native
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.detail || 'Upload failed');
@@ -161,24 +163,14 @@ export default function PrivacyFilterUpload() {
           >
             {pickedUri ? (
               <>
-                <Video
-                  ref={playerRef}
-                  source={{ uri: pickedUri }}
+                <VideoView
+                  player={player}
                   style={styles.preview}
-                  resizeMode={ResizeMode.CONTAIN}
-                  useNativeControls
-                  shouldPlay={false}
-                  isMuted={false}
-                  volume={1.0}
-                  onLoad={async () => {
-                    try {
-                      await playerRef.current?.setStatusAsync({
-                        shouldPlay: false,
-                        isMuted: false,
-                        volume: 1.0,
-                      });
-                    } catch {}
-                  }}
+                  nativeControls
+                  allowsFullscreen
+                  allowsPictureInPicture
+                  // Expo Video uses contentFit instead of resizeMode
+                  contentFit="contain"
                 />
                 <Text style={styles.subtleText}>Preview selected video</Text>
               </>
@@ -237,8 +229,8 @@ export default function PrivacyFilterUpload() {
 
         {/* Instructions below button */}
         <Text style={styles.instructions}>
-          This app analyzes uploaded videos and flags any
-          potential sensitive information (PII) that may be exposed.{"\n\n"} " - Xin Yu Zuckerbug
+          This app analyses uploaded videos and flags any potential sensitive
+          information (PII) that may be exposed.{"\n\n"}
         </Text>
 
       </View>
@@ -275,7 +267,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   cardHeaderText: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#111827',
   },
@@ -295,7 +287,9 @@ const styles = StyleSheet.create({
   emptyBox: { alignItems: 'center', gap: 10 },
   placeholderBig: { fontSize: 18, fontWeight: '700', color: '#6B7280' },
   subtleText: { marginTop: 8, color: '#374151' },
+
   preview: { width: '100%', height: 180, borderRadius: 8, backgroundColor: '#000' },
+
   rowButtons: {
     flexDirection: 'row',
     gap: 10,
@@ -315,6 +309,8 @@ const styles = StyleSheet.create({
   },
   secondaryBtnText: { fontSize: 14, fontWeight: '700', color: '#0f172a' },
   removeBtn: { backgroundColor: '#FEE2E2', borderColor: '#FECACA' },
+
+  // Upload button container shadow
   buttonContainer: {
     width: '100%',
     borderRadius: 14,
@@ -332,6 +328,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 0.3 },
+
   instructions: {
     marginTop: 12,
     textAlign: 'center',
