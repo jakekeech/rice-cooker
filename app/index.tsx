@@ -13,7 +13,13 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
-import { Video, ResizeMode } from 'expo-av';
+import {
+  Video,
+  ResizeMode,
+  Audio,
+  InterruptionModeIOS,
+  InterruptionModeAndroid,
+} from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter, useNavigation, type Href } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,7 +39,24 @@ export default function PrivacyFilterUpload() {
     navigation.setOptions({ title: 'Privacy Filter' });
   }, [navigation]);
 
-  const pickVideo = async () => {
+  // Enable audio playback in silent mode (iOS) + sane Android defaults
+  useEffect(() => {
+    (async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+          playThroughEarpieceAndroid: false,
+          allowsRecordingIOS: false,
+        });
+      } catch {}
+    })();
+  }, []);
+
+  const launchPicker = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert('Permission required', 'Media library permission is needed.');
@@ -50,13 +73,23 @@ export default function PrivacyFilterUpload() {
     }
   };
 
-  // Make sure we have a file:// path (copy/download to cache only if required)
+  const pickVideo = async () => {
+    if (pickedUri) return;
+    await launchPicker();
+  };
+
+  const changeVideo = async () => {
+    await launchPicker();
+  };
+
+  const removeVideo = () => {
+    setPickedUri(null);
+  };
+
   const ensureCacheFile = async (uri: string): Promise<string> => {
     if (uri.startsWith('file://')) return uri;
-
     const ext = uri.split('?')[0].split('.').pop()?.toLowerCase() || 'mp4';
     const dest = `${FileSystem.cacheDirectory}pf_temp_${Date.now()}.${ext}`;
-
     try {
       await FileSystem.copyAsync({ from: uri, to: dest });
       return dest;
@@ -73,7 +106,6 @@ export default function PrivacyFilterUpload() {
       return;
     }
     setBusy(true);
-
     try {
       let fileUri = pickedUri;
       if (!pickedUri.startsWith('file://')) {
@@ -93,7 +125,6 @@ export default function PrivacyFilterUpload() {
       const res = await fetch(`${API_BASE_URL}/analyze/video`, {
         method: 'POST',
         body: form,
-        // Don’t set Content-Type; RN sets correct multipart boundary
         headers: Platform.OS === 'web' ? {} : undefined,
       });
       const json = await res.json();
@@ -102,7 +133,6 @@ export default function PrivacyFilterUpload() {
       const jobId: string | undefined = json?.job_id;
       if (!jobId) throw new Error('Missing job_id from API');
 
-      // Navigate to /analyse with jobId
       router.push({ pathname: '/analyse', params: { jobId } } as unknown as Href);
     } catch (e: any) {
       console.error(e);
@@ -117,14 +147,18 @@ export default function PrivacyFilterUpload() {
       <StatusBar barStyle="dark-content" />
       <View style={styles.container}>
 
-        {/* NEW: Card box with icon + label + upload area */}
+        {/* Upload card */}
         <View style={styles.uploadCard}>
           <View style={styles.cardHeader}>
-            <Ionicons name="videocam-outline" size={20} color="#111827" />
+            <Ionicons name="videocam-outline" size={28} color="#111827" />
             <Text style={styles.cardHeaderText}>Tap to upload video</Text>
           </View>
 
-          <TouchableOpacity style={styles.pickBox} onPress={pickVideo} activeOpacity={0.85}>
+          <TouchableOpacity
+            style={[styles.pickBox, pickedUri && styles.pickBoxDisabled]}
+            onPress={pickVideo}
+            activeOpacity={pickedUri ? 1 : 0.85}
+          >
             {pickedUri ? (
               <>
                 <Video
@@ -133,32 +167,80 @@ export default function PrivacyFilterUpload() {
                   style={styles.preview}
                   resizeMode={ResizeMode.CONTAIN}
                   useNativeControls
+                  shouldPlay={false}
+                  isMuted={false}
+                  volume={1.0}
+                  onLoad={async () => {
+                    try {
+                      await playerRef.current?.setStatusAsync({
+                        shouldPlay: false,
+                        isMuted: false,
+                        volume: 1.0,
+                      });
+                    } catch {}
+                  }}
                 />
-                <Text style={styles.subtleText}>Picked • Tap to change</Text>
+                <Text style={styles.subtleText}>Preview selected video</Text>
               </>
             ) : (
               <View style={styles.emptyBox}>
-                <Ionicons name="cloud-upload-outline" size={24} color="#6B7280" />
-                <Text style={styles.placeholderText}>Tap to upload video</Text>
+                <Ionicons name="cloud-upload-outline" size={42} color="#6B7280" />
+                <Text style={styles.placeholderBig}>Tap to upload video</Text>
               </View>
             )}
           </TouchableOpacity>
+
+          <View style={styles.rowButtons}>
+            <TouchableOpacity
+              onPress={changeVideo}
+              activeOpacity={0.9}
+              disabled={busy}
+              style={[styles.secondaryBtn]}
+            >
+              <Ionicons name="swap-horizontal-outline" size={18} color="#0f172a" />
+              <Text style={styles.secondaryBtnText}>Change video</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={removeVideo}
+              activeOpacity={0.9}
+              disabled={busy || !pickedUri}
+              style={[
+                styles.secondaryBtn,
+                styles.removeBtn,
+                (!pickedUri || busy) && { opacity: 0.6 },
+              ]}
+            >
+              <Ionicons name="trash-outline" size={18} color="#991B1B" />
+              <Text style={[styles.secondaryBtnText, { color: '#991B1B' }]}>Remove video</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        <TouchableOpacity onPress={uploadAndGo} activeOpacity={0.85} disabled={busy} style={{ width: '100%' }}>
-          <LinearGradient
-            colors={['#ADD8E6', '#001F54']} // light blue → dark navy
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={[styles.button, busy && { opacity: 0.7 }]}
-          >
-            {busy ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Text style={styles.buttonText}>Upload</Text>
-            )}
-          </LinearGradient>
-        </TouchableOpacity>
+        {/* Upload button with shadow on container */}
+        <View style={styles.buttonContainer}>
+          <TouchableOpacity onPress={uploadAndGo} activeOpacity={0.9} disabled={busy} style={{ width: '100%' }}>
+            <LinearGradient
+              colors={['#ADD8E6', '#001F54']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[styles.button, busy && { opacity: 0.7 }]}
+            >
+              {busy ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Upload</Text>
+              )}
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+
+        {/* Instructions below button */}
+        <Text style={styles.instructions}>
+          This app analyzes uploaded videos and flags any
+          potential sensitive information (PII) that may be exposed.{"\n\n"} " - Xin Yu Zuckerbug
+        </Text>
+
       </View>
     </SafeAreaView>
   );
@@ -170,11 +252,8 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 16,
     gap: 16,
-    height: '100%',
     alignItems: 'center',
   },
-
-  // --- Upload card wrapper ---
   uploadCard: {
     width: '100%',
     borderRadius: 12,
@@ -182,27 +261,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E5E7EB',
     padding: 12,
-    // subtle shadow
     shadowColor: '#000',
     shadowOpacity: 0.08,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 3 },
     elevation: 2,
-    gap: 10,
+    gap: 12,
   },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 4,
+    gap: 10,
+    justifyContent: 'center',
   },
   cardHeaderText: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 20,
+    fontWeight: '800',
     color: '#111827',
   },
-
-  // --- Upload area ---
   pickBox: {
     width: '100%',
     height: 220,
@@ -215,26 +291,54 @@ const styles = StyleSheet.create({
     padding: 8,
     backgroundColor: '#F9FAFB',
   },
-  emptyBox: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  placeholderText: { color: '#6B7280' },
+  pickBoxDisabled: {},
+  emptyBox: { alignItems: 'center', gap: 10 },
+  placeholderBig: { fontSize: 18, fontWeight: '700', color: '#6B7280' },
   subtleText: { marginTop: 8, color: '#374151' },
   preview: { width: '100%', height: 180, borderRadius: 8, backgroundColor: '#000' },
-
-  // --- Upload button ---
-  button: {
+  rowButtons: {
+    flexDirection: 'row',
+    gap: 10,
     width: '100%',
-    height: 52,
+  },
+  secondaryBtn: {
+    flex: 1,
+    minHeight: 44,
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F3F4F6',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 3,
+    flexDirection: 'row',
+    gap: 8,
   },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  secondaryBtnText: { fontSize: 14, fontWeight: '700', color: '#0f172a' },
+  removeBtn: { backgroundColor: '#FEE2E2', borderColor: '#FECACA' },
+  buttonContainer: {
+    width: '100%',
+    borderRadius: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  button: {
+    width: '100%',
+    height: 54,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 0.3 },
+  instructions: {
+    marginTop: 12,
+    textAlign: 'center',
+    fontSize: 12,
+    fontStyle: 'italic',
+    lineHeight: 20,
+    color: '#374151',
+    paddingHorizontal: 11,
+  },
 });
