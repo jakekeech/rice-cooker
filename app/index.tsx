@@ -1,25 +1,37 @@
-// File: app/privacy-filter/UploadVideoTemp.js
-import React, { useEffect, useRef, useState } from 'react';
+// app/index.tsx
+import React, { useEffect, useRef, useState, useLayoutEffect } from 'react';
 import {
+  ActivityIndicator,
   Alert,
+  Platform,
   SafeAreaView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  ActivityIndicator,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { Video } from 'expo-av';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as FileSystem from 'expo-file-system';
+import { Video, ResizeMode } from 'expo-av';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter, useNavigation, type Href } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 
-export default function UploadVideoTemp() {
-  const [pickedUri, setPickedUri] = useState(null);   // original library URI
-  const [tempUri, setTempUri] = useState(null);       // cached local URI
+const API_BASE_URL = 'http://localhost:8000'; // ← change to your backend host/IP
+
+export default function PrivacyFilterUpload() {
+  const router = useRouter();
+  const navigation = useNavigation();
+  const playerRef = useRef<Video>(null);
+
+  const [pickedUri, setPickedUri] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const playerRef = useRef(null);
+
+  // Keep default header/back button; just set the title
+  useLayoutEffect(() => {
+    navigation.setOptions({ title: 'Privacy Filter' });
+  }, [navigation]);
 
   const pickVideo = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -35,136 +47,118 @@ export default function UploadVideoTemp() {
     });
     if (!result.canceled && result.assets?.[0]?.uri) {
       setPickedUri(result.assets[0].uri);
-      setTempUri(null);
     }
   };
 
-  // Copy to cache as our “temporary store”
-  const saveToTemp = async () => {
+  // Make sure we have a file:// path (copy/download to cache only if required)
+  const ensureCacheFile = async (uri: string): Promise<string> => {
+    if (uri.startsWith('file://')) return uri;
+
+    const ext = uri.split('?')[0].split('.').pop()?.toLowerCase() || 'mp4';
+    const dest = `${FileSystem.cacheDirectory}pf_temp_${Date.now()}.${ext}`;
+
+    try {
+      await FileSystem.copyAsync({ from: uri, to: dest });
+      return dest;
+    } catch {
+      const dl = await FileSystem.downloadAsync(uri, dest);
+      if (dl.status !== 200) throw new Error('Failed to prepare video for upload');
+      return dl.uri;
+    }
+  };
+
+  const uploadAndGo = async () => {
     if (!pickedUri) {
-      Alert.alert('No video selected', 'Tap the box to choose a video first.');
+      Alert.alert('No video selected', 'Choose a video first.');
       return;
     }
+    setBusy(true);
+
     try {
-      setBusy(true);
-
-      // Optional: size guard
-      const info = await FileSystem.getInfoAsync(pickedUri);
-      if (info.exists && info.size && info.size > 300 * 1024 * 1024) { // 300 MB
-        Alert.alert('File too large', 'Please choose a smaller video.');
-        setBusy(false);
-        return;
+      let fileUri = pickedUri;
+      if (!pickedUri.startsWith('file://')) {
+        fileUri = await ensureCacheFile(pickedUri);
       }
 
-      const ext = pickedUri.split('.').pop()?.toLowerCase() || 'mp4';
-      const dest = `${FileSystem.cacheDirectory}temp_video_${Date.now()}.${ext}`;
+      const name = fileUri.split('/').pop() || `video_${Date.now()}.mp4`;
+      const lower = name.toLowerCase();
+      const type =
+        lower.endsWith('.mov') ? 'video/quicktime' :
+        lower.endsWith('.mkv') ? 'video/x-matroska' :
+        'video/mp4';
 
-      // Some gallery URIs are not directly copyable; if that happens,
-      // use FileSystem.downloadAsync as a fallback.
-      try {
-        await FileSystem.copyAsync({ from: pickedUri, to: dest });
-      } catch {
-        const dl = await FileSystem.downloadAsync(pickedUri, dest);
-        if (dl.status !== 200) throw new Error('Download to cache failed');
-      }
+      const form = new FormData();
+      form.append('file', { uri: fileUri, name, type } as any);
 
-      setTempUri(dest);
-      Alert.alert('Saved', 'Video stored temporarily on device.');
-    } catch (e) {
+      const res = await fetch(`${API_BASE_URL}/analyze/video`, {
+        method: 'POST',
+        body: form,
+        // Don’t set Content-Type; RN sets correct multipart boundary
+        headers: Platform.OS === 'web' ? {} : undefined,
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.detail || 'Upload failed');
+
+      const jobId: string | undefined = json?.job_id;
+      if (!jobId) throw new Error('Missing job_id from API');
+
+      // Navigate to /analyse with jobId
+      router.push({ pathname: '/analyse', params: { jobId } } as unknown as Href);
+    } catch (e: any) {
       console.error(e);
-      Alert.alert('Failed', 'Could not store the video temporarily.');
+      Alert.alert('Upload Failed', e?.message || 'Could not upload video.');
     } finally {
       setBusy(false);
     }
   };
 
-  const clearTemp = async () => {
-    try {
-      if (tempUri) {
-        const info = await FileSystem.getInfoAsync(tempUri);
-        if (info.exists) {
-          await FileSystem.deleteAsync(tempUri, { idempotent: true });
-        }
-      }
-      setTempUri(null);
-      setPickedUri(null);
-      // Stop playback if active
-      if (playerRef.current) {
-        await playerRef.current.stopAsync?.().catch(() => {});
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Clean up temp file when screen unmounts (safety)
-  useEffect(() => {
-    return () => {
-      if (tempUri) {
-        FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
-      }
-    };
-  }, [tempUri]);
-
-  const displayUri = tempUri || pickedUri; // preview whatever we have
-
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="dark-content" />
-      {/* Default header */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Privacy Filter</Text>
-      </View>
-
-      {/* Upload Video section */}
       <View style={styles.container}>
-        <Text style={styles.label}>Upload Video</Text>
 
-        <TouchableOpacity style={styles.pickBox} onPress={pickVideo} activeOpacity={0.85}>
-          {displayUri ? (
-            <>
-              <Video
-                ref={playerRef}
-                source={{ uri: displayUri }}
-                style={styles.preview}
-                resizeMode="contain"
-                useNativeControls
-              />
-              <Text style={styles.changeText}>
-                {tempUri ? 'Saved to temp • Tap to replace' : 'Picked • Tap to change'}
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.placeholderText}>Tap to choose a video</Text>
-          )}
-        </TouchableOpacity>
+        {/* NEW: Card box with icon + label + upload area */}
+        <View style={styles.uploadCard}>
+          <View style={styles.cardHeader}>
+            <Ionicons name="videocam-outline" size={20} color="#111827" />
+            <Text style={styles.cardHeaderText}>Tap to upload video</Text>
+          </View>
 
-        {/* Gradient action button */}
-        <TouchableOpacity onPress={saveToTemp} activeOpacity={0.85} disabled={busy} style={{ width: '100%' }}>
+          <TouchableOpacity style={styles.pickBox} onPress={pickVideo} activeOpacity={0.85}>
+            {pickedUri ? (
+              <>
+                <Video
+                  ref={playerRef}
+                  source={{ uri: pickedUri }}
+                  style={styles.preview}
+                  resizeMode={ResizeMode.CONTAIN}
+                  useNativeControls
+                />
+                <Text style={styles.subtleText}>Picked • Tap to change</Text>
+              </>
+            ) : (
+              <View style={styles.emptyBox}>
+                <Ionicons name="cloud-upload-outline" size={24} color="#6B7280" />
+                <Text style={styles.placeholderText}>Tap to upload video</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        <TouchableOpacity onPress={uploadAndGo} activeOpacity={0.85} disabled={busy} style={{ width: '100%' }}>
           <LinearGradient
             colors={['#ADD8E6', '#001F54']} // light blue → dark navy
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={[styles.btn, busy && { opacity: 0.7 }]}
+            style={[styles.button, busy && { opacity: 0.7 }]}
           >
             {busy ? (
               <ActivityIndicator size="small" color="#fff" />
             ) : (
-              <Text style={styles.btnText}>{tempUri ? 'Re-save to Temp' : 'Save to Temp'}</Text>
+              <Text style={styles.buttonText}>Upload</Text>
             )}
           </LinearGradient>
         </TouchableOpacity>
-
-        {tempUri ? (
-          <View style={styles.result}>
-            <Text style={styles.resultLabel}>Temporary file path:</Text>
-            <Text selectable style={styles.resultUrl}>{tempUri}</Text>
-
-            <TouchableOpacity onPress={clearTemp} style={styles.clearBtn} activeOpacity={0.85}>
-              <Text style={styles.clearText}>Clear temp file</Text>
-            </TouchableOpacity>
-          </View>
-        ) : null}
       </View>
     </SafeAreaView>
   );
@@ -172,42 +166,75 @@ export default function UploadVideoTemp() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#fff' },
-  header: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E7EB',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#fff',
+  container: {
+    flex: 1,
+    padding: 16,
+    gap: 16,
+    height: '100%',
+    alignItems: 'center',
   },
-  headerTitle: { fontSize: 18, fontWeight: '600', color: '#111827', textAlign: 'center' },
-  container: { flex: 1, padding: 16, gap: 16 },
-  label: { fontSize: 16, fontWeight: '600', color: '#111827' },
+
+  // --- Upload card wrapper ---
+  uploadCard: {
+    width: '100%',
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    padding: 12,
+    // subtle shadow
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+    gap: 10,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  cardHeaderText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+  },
+
+  // --- Upload area ---
   pickBox: {
-    width: '100%', height: 220,
-    borderWidth: 2, borderColor: '#9CA3AF', borderStyle: 'dashed',
-    borderRadius: 12, alignItems: 'center', justifyContent: 'center',
-    padding: 8, backgroundColor: '#F9FAFB',
+    width: '100%',
+    height: 220,
+    borderWidth: 2,
+    borderColor: '#9CA3AF',
+    borderStyle: 'dashed',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+    backgroundColor: '#F9FAFB',
+  },
+  emptyBox: {
+    alignItems: 'center',
+    gap: 8,
   },
   placeholderText: { color: '#6B7280' },
-  changeText: { marginTop: 8, color: '#374151' },
+  subtleText: { marginTop: 8, color: '#374151' },
   preview: { width: '100%', height: 180, borderRadius: 8, backgroundColor: '#000' },
-  btn: {
-    width: '100%', height: 52, borderRadius: 10,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 }, elevation: 3,
+
+  // --- Upload button ---
+  button: {
+    width: '100%',
+    height: 52,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
   },
-  btnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  result: { marginTop: 8, backgroundColor: '#F3F4F6', borderRadius: 8, padding: 12, gap: 8 },
-  resultLabel: { fontWeight: '600', color: '#111827' },
-  resultUrl: { color: '#1F2937' },
-  clearBtn: {
-    marginTop: 6,
-    alignSelf: 'flex-start',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: '#FEE2E2',
-  },
-  clearText: { color: '#991B1B', fontWeight: '600' },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 });
