@@ -64,7 +64,7 @@ A containerized API for detecting Personally Identifiable Information (PII) in v
 
 ```bash
 git clone <repository-url>
-cd rice-cooker
+cd server
 ```
 
 ### 2. Start the API
