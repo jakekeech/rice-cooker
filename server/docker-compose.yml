@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # Backend API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount models volume for persistent model caching
+      - models_cache:/app/models
+      # Mount temp files volume for video processing
+      - temp_files:/tmp
+    environment:
+      - HF_HOME=/app/models/huggingface
+      - TRANSFORMERS_CACHE=/app/models/huggingface
+      - WHISPER_CACHE=/app/models/whisper
+    healthcheck:
+      test: ["CMD", "python", "health_monitor.py", "--url", "http://localhost:8000"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # Frontend service (disabled for now)
+  # frontend:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.frontend
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - REACT_APP_API_URL=http://localhost:8000
+  #   depends_on:
+  #     - api
+  #   restart: unless-stopped
+
+volumes:
+  # Persistent volume for model caching
+  # Models will be downloaded once and reused across container restarts
+  models_cache:
+    driver: local
+  
+  # Temporary volume for video file processing
+  temp_files:
+    driver: local
+
+networks:
+  default:
+    name: tiktok_pii_analyzer
